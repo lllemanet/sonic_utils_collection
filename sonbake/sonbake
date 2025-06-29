@@ -1,0 +1,195 @@
+#!/bin/bash
+
+set -e
+
+if [[ ! -n $1 ]]; then
+    echo "Usage: $0 <json_config> [OPTS]"
+    exit -1
+fi
+
+CONFIG_FILE=$1
+shift
+
+SONIC_DIR=$(jq -r '.sonicDir' $CONFIG_FILE)
+PACKAGE_NAME=$(jq -r '.packageName' $CONFIG_FILE)
+PACKAGE_DEB_PATH=$(jq -r '.packageDebPath' $CONFIG_FILE)
+DOCKER_SLAVE="${PACKAGE_NAME}-slave"
+WORK_DIR=$(jq -r '.workDir' $CONFIG_FILE)
+DOCKER_WORK_DIR=/sonic/$WORK_DIR/
+TARGETS=""
+REMOTE_HOSTS=""
+TAR_FILENAME="$PACKAGE_NAME.tar"
+TAR_FILE=/tmp/$TAR_FILENAME
+AUTO_YES=false
+CLEAN=false
+SCREEN_LOG="/tmp/screen-${DOCKER_SLAVE}.log"
+
+# Parse flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes)
+            AUTO_YES=true
+            shift
+            ;;
+        --sonic_dir)
+            SONIC_DIR=$2
+            shift 2
+            ;;
+        -t|--targets)
+            TARGETS=$2
+            shift 2
+            ;;
+        -r|--remote_hosts)
+            REMOTE_HOSTS=$2
+            shift 2
+            ;;
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+
+echo "SONIC_DIR:          $SONIC_DIR"
+echo "PACKAGE_NAME:       $PACKAGE_NAME"
+echo "PACKAGE_DEB_PATH:   $PACKAGE_DEB_PATH"
+echo "DOCKER_SLAVE:       $DOCKER_SLAVE"
+echo "WORK_DIR:           $WORK_DIR"
+echo "DOCKER_WORK_DIR:    $DOCKER_WORK_DIR"
+echo "TARGETS:            $TARGETS"
+echo "REMOTE_HOSTS:       $REMOTE_HOSTS"
+echo "TAR_FILENAME:       $TAR_FILENAME"
+echo "AUTO_YES:           $AUTO_YES"
+echo "CLEAN:              $CLEAN"
+echo "SCREEN_LOG:         $SCREEN_LOG"
+echo
+
+revert_changes() {
+    sed -i '/Intentional fail to allow fast rebuild/d' slave.mk
+    if [ -e $PACKAGE_NAME.deb ]; then
+        mv $PACKAGE_NAME.deb $PACKAGE_DEB_PATH
+    fi
+}
+
+destroy_slave() {
+    docker rm -f $DOCKER_SLAVE
+    exit
+}
+
+slave_sh() {
+    docker exec -it -w $DOCKER_WORK_DIR $DOCKER_SLAVE bash -c "$*"
+}
+
+create_docker() {
+    # If docker doesn't exists, create a new one
+    if ! docker inspect "$DOCKER_SLAVE" &>/dev/null; then
+        # Remove previous screen log, since we rely on the specific log pattern
+        # on starting build
+        rm -f $SCREEN_LOG
+
+        # Preserve original .deb.
+        if [ -e $PACKAGE_DEB_PATH ]; then
+            mv $PACKAGE_DEB_PATH $PACKAGE_NAME.deb
+        fi
+
+        # Make slave.mk fail when trying to build target deb by inserting error after "SETUP_OVERLAYFS_FOR_DPKG_ADMINDIR".
+        # Since sonic build system first install all dependencies and we use KEEP_SLAVE_ON=yes to preserve slave container,
+        # when we reach fail, we have a slave with all dependencies needed and we then can do build much faster by
+        # performing direct commands to build binaries but not whole deb package.
+        sed -i "/SETUP_OVERLAYFS_FOR_DPKG_ADMINDIR/a \\
+\t\tif [ \"\$(addprefix \$(DEBS_PATH)/,\$*)\" = \"$PACKAGE_DEB_PATH\" ]\; then echo \"Intentional fail to allow fast rebuild. Remove if not expected.\" >&2; exit 1; fi" slave.mk
+
+        # KEEP_SLAVE_ON=yes will start docker in interactive shell session and attach to it. In order not to
+        # attach current session in the script, we use screen utility.
+        echo "Creating screen session $DOCKER_SLAVE"
+        screen -dmL -Logfile $SCREEN_LOG -S $DOCKER_SLAVE bash -c "KEEP_SLAVE_ON=yes SONIC_BUILDER_EXTRA_CMDLINE='--name $DOCKER_SLAVE' make $PACKAGE_DEB_PATH" $SCREEN_LOG
+
+        # Wait until all dependencies are installed (it happens when we see error we injected in slave.mk)
+        echo "Waiting for dependencies... Check $SCREEN_LOG to make sure we aren't blocked"
+        timeout 1800 bash -c "until grep -q 'Intentional fail to allow fast rebuild' '$SCREEN_LOG'; do sleep 1; done" || {
+            echo "Couldn't load dependencies for $PACKAGE_NAME"
+            revert_changes
+            docker rm -f $DOCKER_SLAVE
+            exit -1
+        }
+        revert_changes
+
+        # Just after first entering docker, we want to perform dpkg-buildpackage for autoconfigure and initial infrastracture
+        # initialization. Allow fail here.
+        set +e
+        slave_sh "DEB_BUILD_OPTIONS='nocheck noopt nostrip' dpkg-buildpackage -j8 -b -us -uc --no-post-clean -nc"
+        set -e
+    else
+        echo "docker container $DOCKER_SLAVE exists"
+    fi
+}
+
+build_targets() {
+    for target in $TARGETS; do
+        # Touch configured files to force rebuilding. This is needed, since some modules won't
+        # rebuild when headers were changes.
+        local touch_files=$(jq -r ".buildTargets.${target}.touchFiles" $CONFIG_FILE)
+        for file in $touch_files; do
+            # touch only existing files
+            slave_sh "[ -e '$DOCKER_WORK_DIR/$file' ] && touch '$file'"
+        done
+
+        local make_subdir=$(jq -r ".buildTargets.${target}.makeSubdir" $CONFIG_FILE)
+        slave_sh "make -C $DOCKER_WORK_DIR/$make_subdir $target"
+    done
+}
+
+package_to_tar() {
+    for target in $TARGETS; do
+        local sysroot=$(mktemp -d)
+        # installFiles is dict with key=src value=dst
+        jq -r ".buildTargets.${target}.installFiles | to_entries[] | \"\(.key) \(.value)\"" $CONFIG_FILE | while read -r src dst; do
+            echo "install -D \"$WORK_DIR/$src\" \"$sysroot/$dst\""
+            install -D "$WORK_DIR/$src" "$sysroot/$dst"
+        done
+        
+        # installSourceFiles are needed for debug via gdb. They must reside in the same
+        # dir as they reside in $DOCKER_SLAVE.
+        for source_file in $(jq -r ".buildTargets.${target}.installSourceFiles[]" $CONFIG_FILE); do
+            echo "install -D \"$WORK_DIR/$source_file\" \"$sysroot/$DOCKER_WORK_DIR/$source_file\""
+            install -D "$WORK_DIR/$source_file" "$sysroot/$DOCKER_WORK_DIR/$source_file"
+        done
+
+        tar -cf /tmp/$TAR_FILENAME -C $sysroot .
+        rm -rf $sysroot
+    done
+}
+
+install_to_remote() {
+    for remote in $REMOTE_HOSTS; do
+        # Copy package to remote home directory
+        scp $TAR_FILE $remote:/home/admin/
+
+        # Install in the remote host or remote docker container
+        local container=$(jq -r ".buildTargets.${target}.container" $CONFIG_FILE)
+        if [ "$container" = "null" ] || [ "$container" = "host" ]; then
+            ssh $remote "sudo tar -xpf /home/admin/$TAR_FILENAME -C /"
+        else
+            ssh $remote "docker cp /home/admin/$TAR_FILENAME $container:/; docker exec $container tar -xpf /$TAR_FILENAME -C /"
+        fi 
+    done
+}
+
+pushd $SONIC_DIR > /dev/null
+trap revert_changes SIGINT
+
+if $CLEAN; then
+    revert_changes
+    docker rm -f $DOCKER_SLAVE
+    exit -1
+fi
+
+create_docker
+build_targets
+package_to_tar
+install_to_remote
+popd > /dev/null

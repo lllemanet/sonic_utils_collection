@@ -1,0 +1,19 @@
+{
+    "sonicDir": "/home/rushem/work/ev-sonic-buildimage",
+    "packageName": "sonic-swss",
+    "packageDebPath": "target/debs/bookworm/swss_1.0.0_amd64.deb",
+    "workDir": "src/sonic-swss",
+    "buildTargets": {
+        "orchagent": {
+            "makeSubdir": "orchagent",
+            "touchFiles": "orchagent/qosorch.cpp",
+            "container": "swss",
+            "installFiles": {
+                "orchagent/orchagent": "/usr/bin/orchagent"
+            },
+            "installSourceFiles": [
+                "orchagent/qosorch.cpp"
+            ]
+        }
+    }
+}
