@@ -3,16 +3,31 @@
 set -e
 
 if [[ ! -n $1 ]]; then
-    echo "Usage: $0 <json_config> [OPTS]"
+    echo "Usage: $(basename $0) <json_config> [OPTS]"
     exit -1
 fi
 
 CONFIG_FILE=$1
+# Search config in the following locations:
+# 1) Current directory
+# 2) /home/$USER/.config/sonbake
+# 3) /etc/sonbake
+if [ -e $CONFIG_FILE ]; then
+    CONFIG_FILE=$(realpath $CONFIG_FILE)
+elif [ -e "/home/$USER/.config/sonbake/$CONFIG_FILE" ]; then
+    CONFIG_FILE=/home/$USER/.config/sonbake/$CONFIG_FILE
+elif [ -e "/etc/sonbake/$CONFIG_FILE" ]; then
+    CONFIG_FILE="/etc/sonbake/$CONFIG_FILE"
+else
+    echo "CONFIG_FILE \"$CONFIG_FILE\" isn't found"
+    exit -1
+fi
 shift
 
 SONIC_DIR=$(jq -r '.sonicDir' $CONFIG_FILE)
 PACKAGE_NAME=$(jq -r '.packageName' $CONFIG_FILE)
 PACKAGE_DEB_PATH=$(jq -r '.packageDebPath' $CONFIG_FILE)
+PACKAGE_DEB_NAME=$(basename $PACKAGE_DEB_PATH)
 DOCKER_SLAVE="${PACKAGE_NAME}-slave"
 WORK_DIR=$(jq -r '.workDir' $CONFIG_FILE)
 DOCKER_WORK_DIR=/sonic/$WORK_DIR/
@@ -53,7 +68,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-
+echo "CONFIG_FILE:        $CONFIG_FILE"
 echo "SONIC_DIR:          $SONIC_DIR"
 echo "PACKAGE_NAME:       $PACKAGE_NAME"
 echo "PACKAGE_DEB_PATH:   $PACKAGE_DEB_PATH"
@@ -70,8 +85,8 @@ echo
 
 revert_changes() {
     sed -i '/Intentional fail to allow fast rebuild/d' slave.mk
-    if [ -e $PACKAGE_NAME.deb ]; then
-        mv $PACKAGE_NAME.deb $PACKAGE_DEB_PATH
+    if [ -e "$SONIC_DIR/$PACKAGE_DEB_NAME" ]; then
+        mv $SONIC_DIR/$PACKAGE_DEB_NAME $PACKAGE_DEB_PATH
     fi
 }
 
@@ -93,7 +108,7 @@ create_docker() {
 
         # Preserve original .deb.
         if [ -e $PACKAGE_DEB_PATH ]; then
-            mv $PACKAGE_DEB_PATH $PACKAGE_NAME.deb
+            mv $PACKAGE_DEB_PATH $SONIC_DIR/$PACKAGE_DEB_NAME
         fi
 
         # Make slave.mk fail when trying to build target deb by inserting error after "SETUP_OVERLAYFS_FOR_DPKG_ADMINDIR".
@@ -169,11 +184,12 @@ install_to_remote() {
         # Copy package to remote home directory
         scp $TAR_FILE $remote:/home/admin/
 
-        # Install in the remote host or remote docker container
+        # Install to remote host. Needed to invoke gdb immediately on the remote host instead of container.
+        ssh $remote "sudo tar -xpf /home/admin/$TAR_FILENAME -C /"
+
+        # If container is set, install on container also
         local container=$(jq -r ".buildTargets.${target}.container" $CONFIG_FILE)
         if [ "$container" = "null" ] || [ "$container" = "host" ]; then
-            ssh $remote "sudo tar -xpf /home/admin/$TAR_FILENAME -C /"
-        else
             ssh $remote "docker cp /home/admin/$TAR_FILENAME $container:/; docker exec $container tar -xpf /$TAR_FILENAME -C /"
         fi 
     done
@@ -183,6 +199,7 @@ pushd $SONIC_DIR > /dev/null
 trap revert_changes SIGINT
 
 if $CLEAN; then
+    echo "Cleaning and destroying $DOCKER_SLAVE"
     revert_changes
     docker rm -f $DOCKER_SLAVE
     exit -1
@@ -192,4 +209,3 @@ create_docker
 build_targets
 package_to_tar
 install_to_remote
-popd > /dev/null
