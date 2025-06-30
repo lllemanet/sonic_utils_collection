@@ -3,7 +3,7 @@
 set -e
 
 if [[ ! -n $1 ]]; then
-    echo "Usage: $(basename $0) <json_config> [OPTS]"
+    echo "Usage: $(basename $0) <module_name> [OPTS]"
     exit -1
 fi
 
@@ -31,7 +31,7 @@ PACKAGE_DEB_NAME=$(basename $PACKAGE_DEB_PATH)
 DOCKER_SLAVE="${PACKAGE_NAME}-slave"
 WORK_DIR=$(jq -r '.workDir' $CONFIG_FILE)
 DOCKER_WORK_DIR=/sonic/$WORK_DIR/
-TARGETS=""
+TARGETS="all"
 REMOTE_HOSTS=""
 DEB_FILENAME="$PACKAGE_NAME.deb"
 AUTO_YES=false
@@ -144,6 +144,11 @@ create_docker() {
 }
 
 build_targets() {
+    if [ -z "$TARGETS" ]; then
+        echo "No targets specified (-t|--targets). Finished."
+        exit
+    fi
+
     for target in $TARGETS; do
         # Touch configured files to force rebuilding. This is needed, since some modules won't
         # rebuild when headers were changes.
@@ -192,6 +197,11 @@ EOF
 }
 
 install_to_remote() {
+    if [ -z $REMOTE_HOSTS ]; then
+        echo "No remote hosts specified (-r|--remote_hosts). Finished."
+        exit
+    fi
+
     for remote in $REMOTE_HOSTS; do
         scp /tmp/$DEB_FILENAME $remote:/tmp/
 
@@ -216,6 +226,10 @@ if $CLEAN; then
     revert_changes
     docker rm -f $DOCKER_SLAVE
     exit -1
+fi
+
+if [ $TARGETS = "all" ]; then
+    TARGETS=$(jq -r '.buildTargets | keys | join(" ")' $CONFIG_FILE)
 fi
 
 create_docker
