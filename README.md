@@ -14,8 +14,8 @@ DESTDIR=/home/$USER/ bindir=bin sysconfdir=.config make install-sonbake
 ## Usage
 ```
 # Build binaries and install them into target
-sonbake swss.json -t orchagent -r admin@localhost
+sonbake swss -t orchagent -r admin@localhost
 
 # Clean
-sonbake swss.json -c
+sonbake swss -c
 ```

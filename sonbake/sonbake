@@ -7,7 +7,7 @@ if [[ ! -n $1 ]]; then
     exit -1
 fi
 
-CONFIG_FILE=$1
+CONFIG_FILE=$1.json
 # Search config in the following locations:
 # 1) Current directory
 # 2) /home/$USER/.config/sonbake
@@ -33,8 +33,7 @@ WORK_DIR=$(jq -r '.workDir' $CONFIG_FILE)
 DOCKER_WORK_DIR=/sonic/$WORK_DIR/
 TARGETS=""
 REMOTE_HOSTS=""
-TAR_FILENAME="$PACKAGE_NAME.tar"
-TAR_FILE=/tmp/$TAR_FILENAME
+DEB_FILENAME="$PACKAGE_NAME.deb"
 AUTO_YES=false
 CLEAN=false
 SCREEN_LOG="/tmp/screen-${DOCKER_SLAVE}.log"
@@ -77,7 +76,7 @@ echo "WORK_DIR:           $WORK_DIR"
 echo "DOCKER_WORK_DIR:    $DOCKER_WORK_DIR"
 echo "TARGETS:            $TARGETS"
 echo "REMOTE_HOSTS:       $REMOTE_HOSTS"
-echo "TAR_FILENAME:       $TAR_FILENAME"
+echo "DEB_FILENAME:       $DEB_FILENAME"
 echo "AUTO_YES:           $AUTO_YES"
 echo "CLEAN:              $CLEAN"
 echo "SCREEN_LOG:         $SCREEN_LOG"
@@ -120,7 +119,8 @@ create_docker() {
 
         # KEEP_SLAVE_ON=yes will start docker in interactive shell session and attach to it. In order not to
         # attach current session in the script, we use screen utility.
-        echo "Creating screen session $DOCKER_SLAVE"
+        echo "Creating docker container $DOCKER_SLAVE"
+        echo "Creating screen for container session $DOCKER_SLAVE"
         screen -dmL -Logfile $SCREEN_LOG -S $DOCKER_SLAVE bash -c "KEEP_SLAVE_ON=yes SONIC_BUILDER_EXTRA_CMDLINE='--name $DOCKER_SLAVE' make $PACKAGE_DEB_PATH" $SCREEN_LOG
 
         # Wait until all dependencies are installed (it happens when we see error we injected in slave.mk)
@@ -150,7 +150,11 @@ build_targets() {
         local touch_files=$(jq -r ".buildTargets.${target}.touchFiles" $CONFIG_FILE)
         for file in $touch_files; do
             # touch only existing files
-            slave_sh "[ -e '$DOCKER_WORK_DIR/$file' ] && touch '$file'"
+            if [ -e $WORK_DIR/$file ]; then
+                touch $WORK_DIR/$file
+            else
+                echo "NOTE: specified touch file $file doesn't exists, skipping it"
+            fi
         done
 
         local make_subdir=$(jq -r ".buildTargets.${target}.makeSubdir" $CONFIG_FILE)
@@ -158,9 +162,9 @@ build_targets() {
     done
 }
 
-package_to_tar() {
+package_to_deb() {
+    local sysroot=$(mktemp -d)
     for target in $TARGETS; do
-        local sysroot=$(mktemp -d)
         # installFiles is dict with key=src value=dst
         jq -r ".buildTargets.${target}.installFiles | to_entries[] | \"\(.key) \(.value)\"" $CONFIG_FILE | while read -r src dst; do
             echo "install -D \"$WORK_DIR/$src\" \"$sysroot/$dst\""
@@ -169,29 +173,38 @@ package_to_tar() {
         
         # installSourceFiles are needed for debug via gdb. They must reside in the same
         # dir as they reside in $DOCKER_SLAVE.
-        for source_file in $(jq -r ".buildTargets.${target}.installSourceFiles[]" $CONFIG_FILE); do
+        for source_file in $(jq -r ".buildTargets.${target}.installSourceFiles[]? // empty" "$CONFIG_FILE"); do
             echo "install -D \"$WORK_DIR/$source_file\" \"$sysroot/$DOCKER_WORK_DIR/$source_file\""
             install -D "$WORK_DIR/$source_file" "$sysroot/$DOCKER_WORK_DIR/$source_file"
         done
-
-        tar -cf /tmp/$TAR_FILENAME -C $sysroot .
-        rm -rf $sysroot
     done
+
+    # Create .deb package as each container has dpkg, while tar messes up with file permissions alot.
+    mkdir -p ${sysroot}/DEBIAN
+    cat <<EOF > ${sysroot}/DEBIAN/control
+Package: $PACKAGE_NAME
+Version: 1.0
+Architecture: amd64
+EOF
+    dpkg-deb -z 0 --build ${sysroot} /tmp/$PACKAGE_NAME.deb
+
+    rm -rf $sysroot
 }
 
 install_to_remote() {
     for remote in $REMOTE_HOSTS; do
-        # Copy package to remote home directory
-        scp $TAR_FILE $remote:/home/admin/
+        scp /tmp/$DEB_FILENAME $remote:/tmp/
 
-        # Install to remote host. Needed to invoke gdb immediately on the remote host instead of container.
-        ssh $remote "sudo tar -xpf /home/admin/$TAR_FILENAME -C /"
+        # Install to remost host unconditionally (needed for sources /sonic to be available for gdb).
+        ssh $remote "sudo dpkg -i --force-all /tmp/$DEB_FILENAME"
 
-        # If container is set, install on container also
-        local container=$(jq -r ".buildTargets.${target}.container" $CONFIG_FILE)
-        if [ "$container" = "null" ] || [ "$container" = "host" ]; then
-            ssh $remote "docker cp /home/admin/$TAR_FILENAME $container:/; docker exec $container tar -xpf /$TAR_FILENAME -C /"
-        fi 
+        for target in $TARGETS; do
+            # If container is set, install to remote host docker container
+            local container=$(jq -r ".buildTargets.${target}.container" $CONFIG_FILE)
+            if [ "$container" != "null" ] && [ "$container" != "host" ]; then
+                ssh $remote "docker cp /tmp/$DEB_FILENAME $container:/; docker exec $container dpkg -i --force-all /$DEB_FILENAME"
+            fi
+        done
     done
 }
 
@@ -207,5 +220,5 @@ fi
 
 create_docker
 build_targets
-package_to_tar
+package_to_deb
 install_to_remote
