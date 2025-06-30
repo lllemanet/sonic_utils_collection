@@ -207,6 +207,9 @@ install_to_remote() {
 
         # Install to remost host unconditionally (needed for sources /sonic to be available for gdb).
         ssh $remote "sudo dpkg -i --force-all /tmp/$DEB_FILENAME"
+        if ! ssh $remote "grep -q 'directory /sonic/$WORK_DIR' /etc/gdb/gdbinit"; then
+            ssh $remote "sudo chmod o+w /etc/gdb/gdbinit; echo 'directory /sonic/$WORK_DIR' >> /etc/gdb/gdbinit"
+        fi
 
         for target in $TARGETS; do
             # If container is set, install to remote host docker container
