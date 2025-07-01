@@ -207,8 +207,21 @@ install_to_remote() {
 
         # Install to remost host unconditionally (needed for sources /sonic to be available for gdb).
         ssh $remote "sudo dpkg -i --force-all /tmp/$DEB_FILENAME"
-        if ! ssh $remote "grep -q 'directory /sonic/$WORK_DIR' /etc/gdb/gdbinit"; then
-            ssh $remote "sudo chmod o+w /etc/gdb/gdbinit; echo 'directory /sonic/$WORK_DIR' >> /etc/gdb/gdbinit"
+
+        # Modify gdbinit if present. Adds pretty printers for readable STL values
+        if ssh $remote "ls /etc/gdb/gdbinit && ! grep -q 'directory /sonic/$WORK_DIR' /etc/gdb/gdbinit"; then
+            ssh $remote "sudo chmod o+w /etc/gdb/gdbinit"
+            ssh $remote 'bash -s' <<EOF
+cat > /etc/gdb/gdbinit <<EOL
+directory /sonic/$WORK_DIR
+python
+import sys
+sys.path.insert(0, '/usr/share/gcc/python')
+from libstdcxx.v6 import register_libstdcxx_printers
+register_libstdcxx_printers(None)
+end
+EOL
+EOF
         fi
 
         for target in $TARGETS; do

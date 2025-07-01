@@ -72,7 +72,14 @@ launch.json:
             "miDebuggerPath": "gdb",
             "cwd": "/home/rushem/work/ev-sonic-buildimage/src/sonic-swss",
             "preLaunchTask": "start_gdbserver",
-            "postDebugTask": "clean_gdbserver"
+            "postDebugTask": "clean_gdbserver",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
         }
     ]
 }
@@ -100,8 +107,8 @@ EOF
 clean() {
     # Allow fail in clean
     set +e
-    screen -S $SCREEN_SESSION -X quit
     ssh $REMOTE_HOST "sudo pkill gdbserver"
+    screen -S $SCREEN_SESSION -X quit
     set -e
 }
 
