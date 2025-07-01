@@ -214,7 +214,7 @@ install_to_remote() {
         if ssh $remote "ls /etc/gdb/gdbinit && ! grep -q 'directory /sonic/$WORK_DIR' /etc/gdb/gdbinit"; then
             ssh $remote "sudo chmod o+w /etc/gdb/gdbinit"
             ssh $remote 'bash -s' <<EOF
-cat > /etc/gdb/gdbinit <<EOL
+cat >> /etc/gdb/gdbinit <<EOL
 directory /sonic/$WORK_DIR
 python
 import sys
