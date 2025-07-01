@@ -1,0 +1,112 @@
+#!/bin/bash
+
+set -e
+
+if [ -z $1 ] || [ -z $2 ]; then
+    echo "Usage: $(basename $0) <remote_host> <local_binary> [OPTS]"
+fi
+
+COMMAND="$0 $@"
+REMOTE_HOST=$1
+LOCAL_BINARY=$(realpath $2)
+shift 2
+
+PORT=1234
+SCREEN_SESSION=songdbserver-${PORT}
+CLEAN=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --port)
+            PORT=$2
+            shift 2
+            ;;
+        -g|--pgrep)
+            PGREP=$2
+            shift 2
+            ;;
+        -b|--remote_binary)
+            REMOTE_BINARY=$2
+            shift 2
+            ;;
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+
+start_gdbserver() {
+    echo "Creating screen session $SCREEN_SESSION for ssh port forwarding to remote"
+    if [ ! -z $PGREP ]; then
+        local pid=$(ssh $REMOTE_HOST pgrep $PGREP 2>/dev/null)
+        echo "Attach gdbserver to $PGREP $pid"
+        screen -dmL -S $SCREEN_SESSION  ssh -L $PORT:localhost:$PORT $REMOTE_HOST "sudo gdbserver :$PORT --attach $pid"
+    elif [ ! -z $REMOTE_BINARY ]; then
+        echo "Start gdbserver $REMOTE_BINARY"
+        screen -dmL -S $SCREEN_SESSION  ssh -L $PORT:localhost:$PORT $REMOTE_HOST "sudo gdbserver :$PORT $REMOTE_BINARY"
+    else
+        echo "No binary/remote pid specified. Exiting..."
+        exit -1
+    fi
+}
+
+recommend_vscode_config() {
+cat <<EOF
+
+launch.json:
+
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "$(basename $LOCAL_BINARY)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "$LOCAL_BINARY",
+            "miDebuggerServerAddress": "localhost:$PORT",
+            "miDebuggerPath": "gdb",
+            "cwd": "/home/rushem/work/ev-sonic-buildimage/src/sonic-swss",
+            "preLaunchTask": "start_gdbserver",
+            "postDebugTask": "clean_gdbserver"
+        }
+    ]
+}
+
+tasks.json:
+
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+                "label": "start_gdbserver",
+                "type": "shell",
+                "command": "$COMMAND"
+        },
+        {
+                "label": "clean_gdbserver",
+                "type": "shell",
+                "command": "$0 $REMOTE_HOST $LOCAL_BINARY -c"
+        }
+    ]
+}
+EOF
+}
+
+clean() {
+    # Allow fail in clean
+    set +e
+    screen -S $SCREEN_SESSION -X quit
+    ssh $REMOTE_HOST "sudo pkill gdbserver"
+    set -e
+}
+
+clean
+if $CLEAN; then exit; fi
+
+start_gdbserver
+recommend_vscode_config
