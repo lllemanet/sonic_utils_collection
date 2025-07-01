@@ -1,0 +1,10 @@
+{
+    "sonicDir": "/home/rushem/work/ev-sonic-buildimage",
+    "packageName": "sonic-swss-common",
+    "packageDebPath": "target/debs/bookworm/libswsscommon_1.0.0_amd64.deb",
+    "dpkgFlags": "DEB_BUILD_PROFILES=nopython2",
+    "workDir": "src/sonic-swss-common",
+    "buildTargets": {
+        "all": {}
+    }
+}

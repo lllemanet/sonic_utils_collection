@@ -164,7 +164,7 @@ build_targets() {
             fi
         done
 
-        local make_subdir=$(jq -r 'select(.buildTargets.${target}.makeSubdir) | .buildTargets.${target}.makeSubdir' $CONFIG_FILE) # Allow not set
+        local make_subdir=$(jq -r "select(.buildTargets.${target}.makeSubdir) | .buildTargets.${target}.makeSubdir" $CONFIG_FILE) # Allow not set
         slave_sh "make -C $DOCKER_WORK_DIR/$make_subdir $target"
     done
 }
